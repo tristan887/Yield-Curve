@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+import requests
+import pickle
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
@@ -7,16 +9,79 @@ import time
 
 start_time = time.time()
 
-def get_latest_curve_for_date(target_date: datetime):
+def fetch_treasury_data(year):
     """
     Fetch the yield curve for a specific date (year determines the table).
     target_date: datetime object
     """
-    year = target_date.year
     url = f"https://home.treasury.gov/resource-center/data-chart-center/interest-rates/TextView?type=daily_treasury_yield_curve&field_tdr_date_value={year}"
     tables = pd.read_html(url, header=0)
     df_raw = tables[0]
     df_raw.columns = [c.strip() for c in df_raw.columns] # clean column names
+    return df_raw
+
+def get_treasury_data(year, cache_file):
+    try:
+        with open(cache_file, 'rb') as f:
+            data = pickle.load(f)
+    except (FileNotFoundError, pickle.UnpicklingError):
+        data = {}
+
+    if year not in data:
+        data[year] = fetch_treasury_data(year)
+        with open(cache_file, 'wb') as f:
+            pickle.dump(data, f)
+
+    return data[year]
+
+# dates
+def get_curve_data_dates(dates, cache_file):
+    min_year = min(date.year for date in dates)
+    max_year = max(date.year for date in dates)
+
+    data = {}
+    for year in range(min_year, max_year + 1):
+        df_raw = get_treasury_data(year, cache_file)
+        data[year] = df_raw
+
+    curve_data = {}
+    for date in dates:
+        year = date.year
+        df_raw = data[year]
+
+        curve_cols = ['Date', '1 Mo', '2 Mo', '3 Mo', '4 Mo', '6 Mo',
+                      '1 Yr', '2 Yr', '3 Yr', '5 Yr', '7 Yr',
+                      '10 Yr', '20 Yr', '30 Yr']
+        df = df_raw[curve_cols]
+        df = df.copy()
+        df.loc[:, 'Date'] = pd.to_datetime(df['Date'])  # convert 'date' column
+
+        row = df[df['Date'] == date]  # get the row matching your target_date
+        if row.empty:  # if exact date isn't available, take closest before it
+            row = df[df['Date'] <= date].iloc[-1:]
+        latest = row.iloc[-1]
+        date_used = latest['Date'].strftime('%Y-%m-%d')
+
+        maturities = latest.index[1:]
+        yields = latest.values[1:]
+
+        yield_numeric = []  # convert yields to float
+        for y in yields:
+            try:
+                yield_numeric.append(float(y))
+            except (ValueError, TypeError):
+                yield_numeric.append(None)
+
+        valid_data = [(m, y) for m, y in zip(maturities, yield_numeric) if y is not None]  # filter valid data
+        maturities_clean, yields_clean = zip(*valid_data)
+
+        curve_data[date] = (date_used, maturities_clean, yields_clean)
+
+    return curve_data
+
+def get_latest_curve(target_date: datetime, cache_file):
+    year = target_date.year
+    df_raw = get_treasury_data(year, cache_file)
 
     curve_cols = ['Date', '1 Mo', '2 Mo', '3 Mo', '4 Mo', '6 Mo',
                   '1 Yr', '2 Yr', '3 Yr', '5 Yr', '7 Yr',
@@ -46,8 +111,9 @@ def get_latest_curve_for_date(target_date: datetime):
  
     return date_used, maturities_clean, yields_clean
 
-# dates
-today = datetime(2025, 11, 7)
+# DATES
+#####################
+today = datetime(2026, 3, 3)
 one_day = timedelta(days=1)
 last_year = today.replace(year=today.year - 1)
 
@@ -55,12 +121,17 @@ day2 = today - one_day
 day3 = today - timedelta(days=2)
 day4 = today - timedelta(days=3)
 
-date25, mats25, yields25 = get_latest_curve_for_date(today)
-date24, mats24, yields24 = get_latest_curve_for_date(last_year)
+dates = [today, last_year, day2, day3, day4]
+cache_file = 'treasury_data_cache.pkl'
+curve_data = get_curve_data_dates(dates, cache_file)
 
-date25_day2, mats25_day2, yields25_day2 = get_latest_curve_for_date(day2)
-date25_day3, mats25_day3, yields25_day3 = get_latest_curve_for_date(day3)
-date25_day4, mats25_day4, yields25_day4 = get_latest_curve_for_date(day4)
+date25, mats25, yields25 = get_latest_curve(today, curve_data)
+date24, mats24, yields24 = get_latest_curve(last_year, curve_data)
+
+date25_day2, mats25_day2, yields25_day2 = get_latest_curve(day2, curve_data)
+date25_day3, mats25_day3, yields25_day3 = get_latest_curve(day3, curve_data)
+date25_day4, mats25_day4, yields25_day4 = get_latest_curve(day4, curve_data)
+##################################
 
 print("="*50)
 print("extraction")
